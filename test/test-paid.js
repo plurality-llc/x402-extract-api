@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import "dotenv/config";
-import { x402Client, wrapFetchWithPayment } from "@x402/fetch";
-import { ExactEvmScheme } from "@x402/evm/exact/client";
+import { createPaidFetch } from "../src/x402-client.js";
 import { privateKeyToAccount } from "viem/accounts";
 
 /**
@@ -31,31 +30,43 @@ if (!PRIVATE_KEY) {
 }
 
 const signer = privateKeyToAccount(PRIVATE_KEY);
-const client = new x402Client();
-client.register("eip155:*", new ExactEvmScheme(signer));
-const paidFetch = wrapFetchWithPayment(fetch, client);
+const paidFetch = createPaidFetch(PRIVATE_KEY);
 
 console.log(`\nWallet: ${signer.address}`);
 console.log(`Server: ${BASE_URL}\n`);
 
-async function testAmazonSkincare() {
-  console.log("=== POST /extract (Amazon skincare top 20, custom schema, $0.05) ===\n");
+async function testGetExtract() {
+  console.log("=== GET /extract (Anthropic company_info, $0.03) ===\n");
+
+  const res = await paidFetch(
+    `${BASE_URL}/extract?url=${encodeURIComponent("https://anthropic.com")}&intent=company_info`
+  );
+
+  const text = await res.text();
+  console.log(`Status: ${res.status}`);
+  try {
+    console.log(JSON.stringify(JSON.parse(text), null, 2));
+  } catch {
+    console.log(`Raw response: ${text}`);
+  }
+  console.log(res.status === 200 ? "\n✅ GET extraction succeeded\n" : "\n❌ Failed\n");
+}
+
+async function testPostExtract() {
+  console.log("=== POST /extract (Reddit r/technology, custom schema, $0.05) ===\n");
 
   const res = await paidFetch(`${BASE_URL}/extract`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      url: "https://www.amazon.com/s?k=skincare",
+      url: "https://www.reddit.com/r/technology",
       intent: "custom",
       schema: {
-        products: [{
-          rank: "number",
-          name: "string",
-          brand: "string",
-          price: "string",
-          rating: "number",
-          review_count: "number",
-          is_sponsored: "boolean",
+        posts: [{
+          title: "string",
+          author: "string",
+          score: "number",
+          comment_count: "number",
         }],
       },
     }),
@@ -66,18 +77,19 @@ async function testAmazonSkincare() {
   try {
     const data = JSON.parse(text);
     console.log(JSON.stringify(data, null, 2));
-    if (data.data?.products) {
-      console.log(`\nExtracted ${data.data.products.length} products`);
+    if (data.data?.posts) {
+      console.log(`\nExtracted ${data.data.posts.length} posts`);
     }
   } catch {
     console.log(`Raw response: ${text}`);
   }
-  console.log(res.status === 200 ? "\n✅ Amazon extraction succeeded\n" : "\n❌ Failed\n");
+  console.log(res.status === 200 ? "\n✅ POST extraction succeeded\n" : "\n❌ Failed\n");
 }
 
 async function main() {
   try {
-    await testAmazonSkincare();
+    await testGetExtract();
+    await testPostExtract();
   } catch (err) {
     console.error(`\nError: ${err.message}`);
     process.exit(1);
