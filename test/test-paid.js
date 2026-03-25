@@ -38,23 +38,24 @@ const paidFetch = wrapFetchWithPayment(fetch, client);
 console.log(`\nWallet: ${signer.address}`);
 console.log(`Server: ${BASE_URL}\n`);
 
-async function testRedditFrontPage() {
-  console.log("=== POST /extract (Reddit front page, custom schema, $0.15) ===\n");
+async function testAmazonSkincare() {
+  console.log("=== POST /extract (Amazon skincare top 20, custom schema, $0.05) ===\n");
 
   const res = await paidFetch(`${BASE_URL}/extract`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      url: "https://www.reddit.com/r/technology",
+      url: "https://www.amazon.com/s?k=skincare",
       intent: "custom",
       schema: {
-        subreddit_posts: [{
-          title: "string",
-          subreddit: "string",
-          author: "string",
-          score: "number",
-          comment_count: "number",
-          url: "string",
+        products: [{
+          rank: "number",
+          name: "string",
+          brand: "string",
+          price: "string",
+          rating: "number",
+          review_count: "number",
+          is_sponsored: "boolean",
         }],
       },
     }),
@@ -63,16 +64,20 @@ async function testRedditFrontPage() {
   const text = await res.text();
   console.log(`Status: ${res.status}`);
   try {
-    console.log(JSON.stringify(JSON.parse(text), null, 2));
+    const data = JSON.parse(text);
+    console.log(JSON.stringify(data, null, 2));
+    if (data.data?.products) {
+      console.log(`\nExtracted ${data.data.products.length} products`);
+    }
   } catch {
     console.log(`Raw response: ${text}`);
   }
-  console.log(res.status === 200 ? "\n✅ Reddit extraction succeeded\n" : "\n❌ Failed\n");
+  console.log(res.status === 200 ? "\n✅ Amazon extraction succeeded\n" : "\n❌ Failed\n");
 }
 
 async function main() {
   try {
-    await testRedditFrontPage();
+    await testAmazonSkincare();
   } catch (err) {
     console.error(`\nError: ${err.message}`);
     process.exit(1);
