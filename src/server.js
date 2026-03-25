@@ -279,7 +279,9 @@ const routes = {
   },
 };
 
-app.use(paymentMiddleware(routes, resourceServer));
+// syncFacilitatorOnStart=false — skip the getSupported() call on startup
+// that fails from Railway's IP. Payment verification still works per-request.
+app.use(paymentMiddleware(routes, resourceServer, undefined, undefined, false));
 
 // ---------------------------------------------------------------------------
 // Routes
