@@ -95,9 +95,9 @@ if (!PAY_TO) {
 // Facilitator setup
 // ---------------------------------------------------------------------------
 const isMainnet = NETWORK === "base";
-const facilitatorUrl = process.env.FACILITATOR_URL || (isMainnet
+const facilitatorUrl = isMainnet
   ? "https://api.cdp.coinbase.com/platform/v2/x402"
-  : "https://facilitator.payai.network");
+  : "https://x402.org/facilitator";
 
 const facilitatorClient = new HTTPFacilitatorClient({ url: facilitatorUrl });
 
