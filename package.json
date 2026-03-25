@@ -1,0 +1,26 @@
+{
+  "name": "x402-extract-api",
+  "version": "1.0.0",
+  "description": "Paid web intelligence extraction API for AI agents via x402",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "test:402": "curl -s http://localhost:4021/extract?url=https://example.com&intent=company_info | jq .",
+    "test:health": "curl -s http://localhost:4021/health | jq ."
+  },
+  "dependencies": {
+    "@x402/express": "^0.1.0",
+    "@x402/core": "^0.1.0",
+    "@x402/evm": "^0.1.0",
+    "@x402/extensions": "^0.1.0",
+    "@coinbase/x402": "^1.0.0",
+    "@anthropic-ai/sdk": "^0.39.0",
+    "express": "^4.21.0",
+    "cheerio": "^1.0.0",
+    "dotenv": "^16.4.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
