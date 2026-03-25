@@ -99,11 +99,16 @@ const facilitatorUrl = isMainnet
   ? "https://api.cdp.coinbase.com/platform/v2/x402"
   : "https://x402.org/facilitator";
 
-const facilitatorClient = new HTTPFacilitatorClient({ url: facilitatorUrl });
+const facilitatorOptions = { url: facilitatorUrl };
 
-if (isMainnet && process.env.CDP_API_KEY_ID) {
+// Add CDP auth if available (required for mainnet, helps avoid rate limits on testnet)
+if (process.env.CDP_API_KEY_ID && process.env.CDP_API_KEY_SECRET) {
+  facilitatorOptions.apiKeyId = process.env.CDP_API_KEY_ID;
+  facilitatorOptions.apiKeySecret = process.env.CDP_API_KEY_SECRET;
   console.log("Using CDP facilitator with authentication");
 }
+
+const facilitatorClient = new HTTPFacilitatorClient(facilitatorOptions);
 
 // ---------------------------------------------------------------------------
 // x402 Resource Server + Bazaar
