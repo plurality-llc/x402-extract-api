@@ -108,6 +108,22 @@ const resourceServer = new x402ResourceServer(facilitatorClient);
 resourceServer.register(networkId, new ExactEvmScheme());
 resourceServer.registerExtension(bazaarResourceServerExtension);
 
+// Initialize facilitator connection with retries (Railway IPs sometimes get 401)
+async function initFacilitator(retries = 5, delay = 3000) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      await resourceServer.initialize();
+      console.log("Facilitator initialized successfully");
+      return;
+    } catch (err) {
+      console.error(`Facilitator init attempt ${i + 1}/${retries} failed: ${err.message}`);
+      if (i < retries - 1) await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  console.error("WARNING: Could not initialize facilitator. Payment routes will fail.");
+}
+initFacilitator();
+
 // ---------------------------------------------------------------------------
 // Express app
 // ---------------------------------------------------------------------------
