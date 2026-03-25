@@ -83,7 +83,8 @@ function setCache(url, intent, schema, data, usage) {
 // ---------------------------------------------------------------------------
 // Playwright — lazy-launched, reused across requests
 // ---------------------------------------------------------------------------
-const MIN_CONTENT_LENGTH = 500;
+const PLAYWRIGHT_ALWAYS = process.env.PLAYWRIGHT_ALWAYS === "true";
+const MIN_CONTENT_LENGTH = 2000;
 let browserInstance = null;
 
 async function getBrowser() {
@@ -102,9 +103,15 @@ async function fetchWithPlaywright(url) {
   const browser = await getBrowser();
   const page = await browser.newPage();
   try {
-    await page.goto(url, { waitUntil: "networkidle", timeout: 20000 });
-    const html = await page.content();
-    return html;
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    // Wait for JS to render content
+    await page.waitForTimeout(3000);
+    // Return both HTML (for metadata) and innerText (for content)
+    const [html, visibleText] = await Promise.all([
+      page.content(),
+      page.evaluate(() => document.body.innerText),
+    ]);
+    return { html, visibleText };
   } finally {
     await page.close();
   }
@@ -162,7 +169,8 @@ Return a JSON object with these fields (omit any that aren't found):
 - plans: [
     {
       name: string,
-      price: { amount: number, currency: string, period: "monthly" | "yearly" | "one_time" },
+      price: { base_amount: number, currency: string, period: "monthly" | "yearly" | "one_time", per_unit: string, usage_credits_included: number },
+      total_effective_cost: string (describe the full cost including base + usage, e.g. "$5/mo base + usage" or "$1/seat/mo + $20 credits"),
       features: string[],
       limits: object,
       highlighted: boolean (if marked as recommended/popular)
@@ -171,7 +179,8 @@ Return a JSON object with these fields (omit any that aren't found):
 - free_tier: boolean
 - enterprise_pricing: boolean (custom/contact sales)
 - discounts: string[] (annual discount, student, etc.)
-- currency_options: string[]`,
+- currency_options: string[]
+IMPORTANT: Capture the EXACT prices as shown on the page. If pricing has multiple components (base fee + usage, per-seat pricing, included credits), capture all parts. Do not simplify or combine price components.`,
 
   job_listing: `Extract structured job listing information from this web page content.
 Return a JSON object with these fields (omit any that aren't found):
@@ -265,10 +274,21 @@ function parseHtml(html) {
   const ogTitle = $('meta[property="og:title"]').attr("content") || "";
   const ogDescription = $('meta[property="og:description"]').attr("content") || "";
 
-  const mainContent =
-    $("main").text() || $("article").text() || $('[role="main"]').text() || $("body").text();
+  // Add newlines after block elements to preserve content boundaries
+  $("h1, h2, h3, h4, h5, h6, p, div, li, tr, br, section, article").each((_, el) => {
+    $(el).append("\n");
+  });
 
-  const cleanText = mainContent.replace(/\s+/g, " ").trim();
+  const root = $("main").length ? $("main") : $("article").length ? $("article") : $('[role="main"]').length ? $('[role="main"]') : $("body");
+  const rawText = root.text();
+
+  // Collapse runs of whitespace but keep newlines as separators
+  const cleanText = rawText
+    .split("\n")
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter((line) => line.length > 0)
+    .join("\n")
+    .trim();
   const truncated = cleanText.slice(0, 12000);
 
   return {
@@ -283,7 +303,26 @@ function parseHtml(html) {
 }
 
 export async function fetchPageContent(url) {
-  // Stage 1: Cheerio (fast, lightweight)
+  // Playwright-first: always render with a real browser for accurate content
+  if (PLAYWRIGHT_ALWAYS) {
+    try {
+      const { html, visibleText } = await fetchWithPlaywright(url);
+      const rendered = parseHtml(html);
+      // Use browser's innerText for content — it preserves visual text layout
+      // including prices split across DOM elements
+      const cleanVisible = visibleText.split("\n").map(l => l.trim()).filter(l => l).join("\n").slice(0, 12000);
+      rendered.content = cleanVisible;
+      rendered.fullLength = visibleText.length;
+      rendered.truncated = visibleText.length > 12000;
+      rendered.renderer = "playwright";
+      return rendered;
+    } catch (err) {
+      console.error(`Playwright failed for ${url}, falling back to Cheerio: ${err.message}`);
+      // Fall through to Cheerio
+    }
+  }
+
+  // Cheerio fetch
   const response = await fetch(url, {
     headers: {
       "User-Agent":
@@ -300,19 +339,20 @@ export async function fetchPageContent(url) {
   const html = await response.text();
   const page = parseHtml(html);
 
-  // Stage 2: If Cheerio got insufficient content, retry with Playwright
-  if (page.content.length < MIN_CONTENT_LENGTH) {
+  // If not in Playwright-always mode, fall back to Playwright for thin content
+  if (!PLAYWRIGHT_ALWAYS && page.content.length < MIN_CONTENT_LENGTH) {
     console.log(`Cheerio got ${page.content.length} chars for ${url}, falling back to Playwright`);
     try {
-      const renderedHtml = await fetchWithPlaywright(url);
-      const rendered = parseHtml(renderedHtml);
+      const { html, visibleText } = await fetchWithPlaywright(url);
+      const rendered = parseHtml(html);
+      const cleanVisible = visibleText.split("\n").map(l => l.trim()).filter(l => l).join("\n").slice(0, 12000);
+      rendered.content = cleanVisible;
+      rendered.fullLength = visibleText.length;
+      rendered.truncated = visibleText.length > 12000;
       rendered.renderer = "playwright";
       return rendered;
     } catch (err) {
       console.error(`Playwright fallback failed for ${url}: ${err.message}`);
-      // Return Cheerio result anyway — might still be usable
-      page.renderer = "cheerio";
-      return page;
     }
   }
 
@@ -351,6 +391,7 @@ async function runExtraction(page, prompt, model) {
   const message = await anthropic.messages.create({
     model,
     max_tokens: 2000,
+    system: "You are a precise data extraction engine. ONLY extract information that is explicitly stated on the page. NEVER infer, guess, or hallucinate data. If a field is not clearly present in the page content, omit it entirely. Accuracy is more important than completeness.",
     messages: [
       {
         role: "user",
@@ -369,7 +410,7 @@ ${page.content}
 
 ---
 
-Return ONLY valid JSON. No markdown, no backticks, no explanation. Just the JSON object.`,
+Return ONLY valid JSON. No markdown, no backticks, no explanation. Just the JSON object. Only include fields where the data is explicitly found on the page.`,
       },
     ],
   });

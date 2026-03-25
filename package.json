@@ -16,11 +16,13 @@
     "@x402/evm": "^2.8.0",
     "@x402/express": "^2.8.0",
     "@x402/extensions": "^2.8.0",
+    "@x402/fetch": "^2.8.0",
     "better-sqlite3": "^12.8.0",
     "cheerio": "^1.0.0",
     "dotenv": "^16.4.0",
     "express": "^4.21.0",
-    "playwright": "^1.58.2"
+    "playwright": "^1.58.2",
+    "viem": "^2.47.6"
   },
   "engines": {
     "node": ">=20.0.0"
