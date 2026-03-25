@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "dotenv/config";
 
 /**
  * Test script for x402-extract-api

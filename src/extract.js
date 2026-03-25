@@ -1,4 +1,9 @@
 import * as cheerio from "cheerio";
+import { chromium } from "playwright";
+import Database from "better-sqlite3";
+import { createHash } from "crypto";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import Anthropic from "@anthropic-ai/sdk";
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
@@ -14,8 +19,95 @@ const MODELS = {
 const SONNET_INTENTS = new Set(["article_summary", "reviews"]);
 
 function getModel(intent) {
-  if (intent === "custom") return MODELS.fast;
+  if (intent === "custom") return MODELS.smart;
   return SONNET_INTENTS.has(intent) ? MODELS.smart : MODELS.fast;
+}
+
+// ---------------------------------------------------------------------------
+// Cache — SQLite, keyed on url+intent+schema, 6-hour TTL
+// ---------------------------------------------------------------------------
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const CACHE_TTL = {
+  company_info:     24 * 60 * 60 * 1000,
+  article_summary:  24 * 60 * 60 * 1000,
+  reviews:          12 * 60 * 60 * 1000,
+  product_specs:     6 * 60 * 60 * 1000,
+  pricing:           2 * 60 * 60 * 1000,
+  job_listing:       2 * 60 * 60 * 1000,
+  contact_extraction: 24 * 60 * 60 * 1000,
+  structured_table:  12 * 60 * 60 * 1000,
+  social_profile:    12 * 60 * 60 * 1000,
+  custom:             1 * 60 * 60 * 1000,
+};
+const DEFAULT_TTL_MS = 6 * 60 * 60 * 1000;
+
+const db = new Database(join(__dirname, "..", "cache.db"));
+db.pragma("journal_mode = WAL");
+db.exec(`
+  CREATE TABLE IF NOT EXISTS cache (
+    key TEXT PRIMARY KEY,
+    intent TEXT NOT NULL,
+    data TEXT NOT NULL,
+    usage TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  )
+`);
+
+const cacheGet = db.prepare("SELECT intent, data, usage, created_at FROM cache WHERE key = ?");
+const cacheSet = db.prepare("INSERT OR REPLACE INTO cache (key, intent, data, usage, created_at) VALUES (?, ?, ?, ?, ?)");
+const cachePurge = db.prepare("DELETE FROM cache WHERE created_at < ?");
+
+// Purge oldest possible entries on startup and every hour
+cachePurge.run(Date.now() - 24 * 60 * 60 * 1000);
+setInterval(() => cachePurge.run(Date.now() - 24 * 60 * 60 * 1000), 60 * 60 * 1000);
+
+function cacheKey(url, intent, schema) {
+  const raw = JSON.stringify({ url, intent, schema: schema || null });
+  return createHash("sha256").update(raw).digest("hex");
+}
+
+function getCached(url, intent, schema) {
+  const row = cacheGet.get(cacheKey(url, intent, schema));
+  if (!row) return null;
+  const ttl = CACHE_TTL[intent] || DEFAULT_TTL_MS;
+  if (Date.now() - row.created_at > ttl) return null;
+  return { data: JSON.parse(row.data), usage: { ...JSON.parse(row.usage), cached: true } };
+}
+
+function setCache(url, intent, schema, data, usage) {
+  const key = cacheKey(url, intent, schema);
+  cacheSet.run(key, intent, JSON.stringify(data), JSON.stringify(usage), Date.now());
+}
+
+// ---------------------------------------------------------------------------
+// Playwright — lazy-launched, reused across requests
+// ---------------------------------------------------------------------------
+const MIN_CONTENT_LENGTH = 500;
+let browserInstance = null;
+
+async function getBrowser() {
+  if (!browserInstance) {
+    browserInstance = await chromium.launch({ headless: true });
+  }
+  return browserInstance;
+}
+
+// Clean up on exit
+process.on("exit", () => browserInstance?.close().catch(() => {}));
+process.on("SIGINT", () => { browserInstance?.close().catch(() => {}); process.exit(); });
+process.on("SIGTERM", () => { browserInstance?.close().catch(() => {}); process.exit(); });
+
+async function fetchWithPlaywright(url) {
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+  try {
+    await page.goto(url, { waitUntil: "networkidle", timeout: 20000 });
+    const html = await page.content();
+    return html;
+  } finally {
+    await page.close();
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -110,31 +202,61 @@ Return a JSON object with these fields (omit any that aren't found):
   ] (max 5 most recent/helpful)
 - recommendation_rate: number (percentage who recommend, if available)
 - comparison_mentions: string[] (other products frequently compared to)`,
+
+  contact_extraction: `Extract all contact information and outreach channels from this web page content.
+Return a JSON object with these fields (omit any that aren't found):
+- company_name: string
+- emails: [ { address: string, label: string } ] (e.g. label: "sales", "support", "general")
+- phones: [ { number: string, label: string } ]
+- addresses: [ { full: string, city: string, state: string, country: string, postal_code: string } ]
+- social: { twitter: string, linkedin: string, github: string, facebook: string, instagram: string, youtube: string }
+- contact_form_url: string
+- chat_available: boolean
+- key_people: [ { name: string, role: string, email: string, linkedin: string } ] (max 10)
+- hours: string (business hours if listed)`,
+
+  structured_table: `Extract all data tables from this web page content into structured JSON.
+Return a JSON object with these fields:
+- tables: [
+    {
+      title: string (table heading or caption if found, otherwise infer from context),
+      headers: string[] (column names),
+      rows: object[] (each row as key-value pairs using headers as keys),
+      row_count: number
+    }
+  ]
+If only one table is found, still wrap it in the tables array.
+Preserve the original data types where possible (numbers as numbers, dates as strings, booleans as booleans).
+If the page has no tables but has list-like structured data (definition lists, spec sheets, key-value pairs), extract those as a single-column table.`,
+
+  social_profile: `Extract structured profile information from this social media or professional profile page.
+Return a JSON object with these fields (omit any that aren't found):
+- platform: string (e.g. "linkedin", "twitter", "github", "personal_site")
+- name: string
+- headline: string (bio, tagline, or professional headline)
+- location: string
+- avatar_url: string
+- profile_url: string (canonical URL)
+- current_role: { title: string, company: string, start_date: string }
+- experience: [ { title: string, company: string, duration: string } ] (max 5 most recent)
+- education: [ { school: string, degree: string, field: string } ]
+- skills: string[] (max 15)
+- followers: number
+- connections: number
+- posts_count: number
+- websites: string[]
+- languages: string[]
+- open_to: string[] (e.g. "hiring", "freelance", "collaborations")`,
 };
 
 export const VALID_INTENTS = [...Object.keys(INTENT_PROMPTS), "custom"];
 
 // ---------------------------------------------------------------------------
-// Fetch + clean page content
+// Fetch + clean page content (Cheerio first, Playwright fallback)
 // ---------------------------------------------------------------------------
-export async function fetchPageContent(url) {
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (compatible; x402-extract-api/1.0; +https://github.com/plurality-llc/x402-extract-api)",
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    },
-    signal: AbortSignal.timeout(15000),
-  });
-
-  if (!response.ok) {
-    throw new Error(`Failed to fetch URL: HTTP ${response.status}`);
-  }
-
-  const html = await response.text();
+function parseHtml(html) {
   const $ = cheerio.load(html);
 
-  // Remove noise
   $("script, style, noscript, iframe, svg, nav, footer, header").remove();
   $("[aria-hidden=true]").remove();
 
@@ -158,6 +280,44 @@ export async function fetchPageContent(url) {
     fullLength: cleanText.length,
     truncated: cleanText.length > 12000,
   };
+}
+
+export async function fetchPageContent(url) {
+  // Stage 1: Cheerio (fast, lightweight)
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (compatible; x402-extract-api/1.0; +https://github.com/plurality-llc/x402-extract-api)",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+    signal: AbortSignal.timeout(15000),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Failed to fetch URL: HTTP ${response.status}`);
+  }
+
+  const html = await response.text();
+  const page = parseHtml(html);
+
+  // Stage 2: If Cheerio got insufficient content, retry with Playwright
+  if (page.content.length < MIN_CONTENT_LENGTH) {
+    console.log(`Cheerio got ${page.content.length} chars for ${url}, falling back to Playwright`);
+    try {
+      const renderedHtml = await fetchWithPlaywright(url);
+      const rendered = parseHtml(renderedHtml);
+      rendered.renderer = "playwright";
+      return rendered;
+    } catch (err) {
+      console.error(`Playwright fallback failed for ${url}: ${err.message}`);
+      // Return Cheerio result anyway — might still be usable
+      page.renderer = "cheerio";
+      return page;
+    }
+  }
+
+  page.renderer = "cheerio";
+  return page;
 }
 
 // ---------------------------------------------------------------------------
@@ -232,9 +392,12 @@ Return ONLY valid JSON. No markdown, no backticks, no explanation. Just the JSON
 }
 
 // ---------------------------------------------------------------------------
-// Single URL extraction
+// Single URL extraction (with cache)
 // ---------------------------------------------------------------------------
 export async function extract(url, intent, customSchema = null) {
+  const cached = getCached(url, intent, customSchema);
+  if (cached) return cached;
+
   const prompt = buildPrompt(intent, customSchema);
   const model = getModel(intent);
   const page = await fetchPageContent(url);
@@ -243,7 +406,10 @@ export async function extract(url, intent, customSchema = null) {
     throw new Error("Page returned insufficient content for extraction");
   }
 
-  return runExtraction(page, prompt, model);
+  const result = await runExtraction(page, prompt, model);
+  result.usage.renderer = page.renderer;
+  setCache(url, intent, customSchema, result.data, result.usage);
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,23 +423,22 @@ export async function extractBatch(urls, intent, customSchema = null) {
   const prompt = buildPrompt(intent, customSchema);
   const model = getModel(intent);
 
-  // Fetch all pages in parallel
-  const pageResults = await Promise.allSettled(urls.map((u) => fetchPageContent(u)));
+  const extractionPromises = urls.map(async (url) => {
+    // Check cache per URL
+    const cached = getCached(url, intent, customSchema);
+    if (cached) return { url, success: true, error: null, ...cached };
 
-  // Extract from each successfully fetched page in parallel
-  const extractionPromises = pageResults.map(async (result, i) => {
-    if (result.status === "rejected") {
-      return { url: urls[i], success: false, error: result.reason.message, data: null, usage: null };
-    }
-    const page = result.value;
-    if (!page.content || page.content.length < 50) {
-      return { url: urls[i], success: false, error: "Insufficient content", data: null, usage: null };
-    }
     try {
+      const page = await fetchPageContent(url);
+      if (!page.content || page.content.length < 50) {
+        return { url, success: false, error: "Insufficient content", data: null, usage: null };
+      }
       const { data, usage } = await runExtraction(page, prompt, model);
-      return { url: urls[i], success: true, error: null, data, usage };
+      usage.renderer = page.renderer;
+      setCache(url, intent, customSchema, data, usage);
+      return { url, success: true, error: null, data, usage };
     } catch (err) {
-      return { url: urls[i], success: false, error: err.message, data: null, usage: null };
+      return { url, success: false, error: err.message, data: null, usage: null };
     }
   });
 

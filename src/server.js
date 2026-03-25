@@ -10,6 +10,70 @@ import {
 import { extract, extractBatch, VALID_INTENTS } from "./extract.js";
 
 // ---------------------------------------------------------------------------
+// Metrics — in-memory, reset on restart, protected by METRICS_KEY
+// ---------------------------------------------------------------------------
+const metrics = {
+  started_at: new Date().toISOString(),
+  requests: 0,
+  by_intent: {},
+  by_renderer: { cheerio: 0, playwright: 0 },
+  cache_hits: 0,
+  cache_misses: 0,
+  errors: 0,
+  tokens: { input: 0, output: 0 },
+  response_times: [],
+};
+
+function recordMetrics(intent, usage, startTime) {
+  metrics.requests++;
+  metrics.by_intent[intent] = (metrics.by_intent[intent] || 0) + 1;
+  metrics.response_times.push(Date.now() - startTime);
+  // Keep last 1000 response times
+  if (metrics.response_times.length > 1000) metrics.response_times.shift();
+
+  if (usage?.cached) {
+    metrics.cache_hits++;
+  } else {
+    metrics.cache_misses++;
+  }
+  if (usage?.renderer) {
+    metrics.by_renderer[usage.renderer] = (metrics.by_renderer[usage.renderer] || 0) + 1;
+  }
+  if (usage?.input_tokens) {
+    metrics.tokens.input += usage.input_tokens;
+    metrics.tokens.output += usage.output_tokens;
+  }
+}
+
+function getMetricsSummary() {
+  const times = metrics.response_times.slice().sort((a, b) => a - b);
+  const p50 = times[Math.floor(times.length * 0.5)] || 0;
+  const p95 = times[Math.floor(times.length * 0.95)] || 0;
+  const cacheRate = metrics.requests > 0
+    ? ((metrics.cache_hits / metrics.requests) * 100).toFixed(1) + "%"
+    : "0%";
+  const playwrightRate = metrics.requests > 0
+    ? ((metrics.by_renderer.playwright / metrics.requests) * 100).toFixed(1) + "%"
+    : "0%";
+
+  const estimatedCost = (
+    metrics.tokens.input * 0.000001 +
+    metrics.tokens.output * 0.000005
+  ).toFixed(4);
+
+  return {
+    uptime_since: metrics.started_at,
+    total_requests: metrics.requests,
+    errors: metrics.errors,
+    by_intent: metrics.by_intent,
+    cache: { hits: metrics.cache_hits, misses: metrics.cache_misses, hit_rate: cacheRate },
+    renderer: { ...metrics.by_renderer, playwright_rate: playwrightRate },
+    response_time_ms: { p50, p95, samples: times.length },
+    tokens: { ...metrics.tokens, estimated_claude_cost: `$${estimatedCost}` },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 const PORT = parseInt(process.env.PORT || "4021");
@@ -66,9 +130,9 @@ const accepts = {
 const routes = {
   // Single URL extraction via GET (preset intents)
   "GET /extract": {
-    accepts: { ...accepts, price: "$0.02" },
+    accepts: { ...accepts, price: "$0.03" },
     description:
-      "Extract structured data from any URL. Pass ?url=...&intent=... with intent being one of: product_specs, company_info, article_summary, pricing, job_listing, reviews.",
+      "Extract structured data from any URL. Pass ?url=...&intent=... with intent being one of: product_specs, company_info, article_summary, pricing, job_listing, reviews, contact_extraction, structured_table, social_profile.",
     mimeType: "application/json",
     extensions: {
       ...declareDiscoveryExtension({
@@ -85,7 +149,7 @@ const routes = {
             intent: {
               type: "string",
               description:
-                "Extraction type: product_specs, company_info, article_summary, pricing, job_listing, or reviews.",
+                "Extraction type: product_specs, company_info, article_summary, pricing, job_listing, reviews, contact_extraction, structured_table, or social_profile.",
               enum: [
                 "product_specs",
                 "company_info",
@@ -93,6 +157,9 @@ const routes = {
                 "pricing",
                 "job_listing",
                 "reviews",
+                "contact_extraction",
+                "structured_table",
+                "social_profile",
               ],
             },
           },
@@ -119,7 +186,7 @@ const routes = {
 
   // Custom schema + batch extraction via POST
   "POST /extract": {
-    accepts: { ...accepts, price: "$0.10" },
+    accepts: { ...accepts, price: "$0.15" },
     description:
       "Advanced extraction. Send a JSON body with: url (string) or urls (string[], max 10), intent (string, or 'custom'), and optional schema (object, your own JSON schema). Supports batch extraction across multiple URLs in one call.",
     mimeType: "application/json",
@@ -146,7 +213,7 @@ const routes = {
             intent: {
               type: "string",
               description:
-                "Extraction intent. Use a preset (product_specs, company_info, etc.) or 'custom' with a schema.",
+                "Extraction intent. Use a preset (product_specs, company_info, pricing, job_listing, reviews, contact_extraction, structured_table, social_profile) or 'custom' with a schema.",
             },
             schema: {
               type: "object",
@@ -181,6 +248,16 @@ app.use(paymentMiddleware(routes, resourceServer));
 // Routes
 // ---------------------------------------------------------------------------
 
+// Metrics (protected)
+const METRICS_KEY = process.env.METRICS_KEY || "change-me";
+
+app.get("/metrics", (req, res) => {
+  if (req.headers["x-metrics-key"] !== METRICS_KEY) {
+    return res.status(401).json({ error: "Invalid or missing X-Metrics-Key header" });
+  }
+  res.json(getMetricsSummary());
+});
+
 // Health check (free)
 app.get("/health", (_req, res) => {
   res.json({
@@ -189,12 +266,12 @@ app.get("/health", (_req, res) => {
     version: "1.1.0",
     network: NETWORK,
     endpoints: {
-      "GET /extract": { price: "$0.02", description: "Single URL, preset intent" },
+      "GET /extract": { price: "$0.03", description: "Single URL, preset intent" },
       "POST /extract": {
-        price: "$0.10",
+        price: "$0.15",
         description: "Custom schema, batch (up to 10 URLs), or single URL",
       },
-      "POST /valuate": { price: "$0.05", status: "coming_soon" },
+      "POST /valuate": { price: "$0.10", status: "coming_soon" },
     },
     valid_intents: VALID_INTENTS,
   });
@@ -224,10 +301,13 @@ app.get("/extract", async (req, res) => {
     });
   }
 
+  const startTime = Date.now();
   try {
     const { data, usage } = await extract(url, intent);
+    recordMetrics(intent, usage, startTime);
     res.json({ success: true, intent, url, data, usage, extracted_at: new Date().toISOString() });
   } catch (err) {
+    metrics.errors++;
     console.error(`Extraction failed for ${url}:`, err.message);
     res.status(500).json({ success: false, error: err.message });
   }
@@ -264,8 +344,10 @@ app.post("/extract", async (req, res) => {
       return res.status(400).json({ error: "urls array is empty" });
     }
 
+    const startTime = Date.now();
     try {
       const results = await extractBatch(urls, intent, schema || null);
+      results.forEach((r) => { if (r.usage) recordMetrics(intent, r.usage, startTime); });
       const totalUsage = results.reduce(
         (acc, r) => {
           if (r.usage) {
@@ -288,6 +370,7 @@ app.post("/extract", async (req, res) => {
         extracted_at: new Date().toISOString(),
       });
     } catch (err) {
+      metrics.errors++;
       console.error("Batch extraction failed:", err.message);
       res.status(500).json({ success: false, error: err.message });
     }
@@ -299,10 +382,13 @@ app.post("/extract", async (req, res) => {
     return res.status(400).json({ error: "Provide either 'url' (string) or 'urls' (array) in the body" });
   }
 
+  const startTime = Date.now();
   try {
     const { data, usage } = await extract(url, intent, schema || null);
+    recordMetrics(intent, usage, startTime);
     res.json({ success: true, intent, url, data, usage, extracted_at: new Date().toISOString() });
   } catch (err) {
+    metrics.errors++;
     console.error(`Extraction failed for ${url}:`, err.message);
     res.status(500).json({ success: false, error: err.message });
   }
@@ -318,7 +404,7 @@ app.listen(PORT, () => {
   console.log(`   Facilitator: ${facilitatorUrl}`);
   console.log(`\n   Endpoints:`);
   console.log(`     GET  /health   — free`);
-  console.log(`     GET  /extract  — $0.02 (preset intent, single URL)`);
-  console.log(`     POST /extract  — $0.10 (custom schema, batch up to 10 URLs)`);
-  console.log(`     POST /valuate  — $0.05 (coming soon)\n`);
+  console.log(`     GET  /extract  — $0.03 (preset intent, single URL)`);
+  console.log(`     POST /extract  — $0.15 (custom schema, batch up to 10 URLs)`);
+  console.log(`     POST /valuate  — $0.10 (coming soon)\n`);
 });
