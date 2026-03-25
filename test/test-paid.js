@@ -38,34 +38,24 @@ const paidFetch = wrapFetchWithPayment(fetch, client);
 console.log(`\nWallet: ${signer.address}`);
 console.log(`Server: ${BASE_URL}\n`);
 
-async function testGetExtract() {
-  console.log("=== GET /extract (company_info, $0.03) ===\n");
-  const url = `${BASE_URL}/extract?url=https://anthropic.com&intent=company_info`;
-
-  const res = await paidFetch(url);
-  const text = await res.text();
-  console.log(`Status: ${res.status}`);
-  try {
-    console.log(JSON.stringify(JSON.parse(text), null, 2));
-  } catch {
-    console.log(`Raw response: ${text}`);
-  }
-  console.log(res.status === 200 ? "\n✅ Paid extraction succeeded\n" : "\n❌ Failed\n");
-}
-
-async function testPostExtract() {
-  console.log("=== POST /extract (custom schema, $0.15) ===\n");
+async function testRedditFrontPage() {
+  console.log("=== POST /extract (Reddit front page, custom schema, $0.15) ===\n");
 
   const res = await paidFetch(`${BASE_URL}/extract`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      url: "https://railway.app/pricing",
+      url: "https://www.reddit.com/r/technology",
       intent: "custom",
       schema: {
-        product_name: "string",
-        plans: [{ name: "string", monthly_price: "number", highlighted: "boolean" }],
-        free_tier: "boolean",
+        subreddit_posts: [{
+          title: "string",
+          subreddit: "string",
+          author: "string",
+          score: "number",
+          comment_count: "number",
+          url: "string",
+        }],
       },
     }),
   });
@@ -77,13 +67,12 @@ async function testPostExtract() {
   } catch {
     console.log(`Raw response: ${text}`);
   }
-  console.log(res.status === 200 ? "\n✅ Paid custom extraction succeeded\n" : "\n❌ Failed\n");
+  console.log(res.status === 200 ? "\n✅ Reddit extraction succeeded\n" : "\n❌ Failed\n");
 }
 
 async function main() {
   try {
-    await testGetExtract();
-    await testPostExtract();
+    await testRedditFrontPage();
   } catch (err) {
     console.error(`\nError: ${err.message}`);
     process.exit(1);

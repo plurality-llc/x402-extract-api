@@ -16,7 +16,7 @@ const metrics = {
   started_at: new Date().toISOString(),
   requests: 0,
   by_intent: {},
-  by_renderer: { cheerio: 0, playwright: 0 },
+  by_renderer: { cheerio: 0, playwright: 0, "reddit-json": 0 },
   cache_hits: 0,
   cache_misses: 0,
   errors: 0,
@@ -184,17 +184,17 @@ const routes = {
     },
   },
 
-  // Custom schema + batch extraction via POST
+  // Single URL extraction via POST (custom schema support)
   "POST /extract": {
-    accepts: { ...accepts, price: "$0.15" },
+    accepts: { ...accepts, price: "$0.05" },
     description:
-      "Advanced extraction. Send a JSON body with: url (string) or urls (string[], max 10), intent (string, or 'custom'), and optional schema (object, your own JSON schema). Supports batch extraction across multiple URLs in one call.",
+      "Extract structured data from a single URL with any intent including custom schemas. Send a JSON body with: url (string), intent (string), and optional schema (object for custom intent).",
     mimeType: "application/json",
     extensions: {
       ...declareDiscoveryExtension({
         bodyType: "json",
         input: {
-          urls: ["https://example.com/pricing", "https://other.com/pricing"],
+          url: "https://example.com/pricing",
           intent: "custom",
           schema: {
             name: "string",
@@ -204,12 +204,7 @@ const routes = {
         },
         inputSchema: {
           properties: {
-            url: { type: "string", description: "Single URL to extract from." },
-            urls: {
-              type: "array",
-              items: { type: "string" },
-              description: "Multiple URLs (max 10). Use this OR url, not both.",
-            },
+            url: { type: "string", description: "URL to extract from." },
             intent: {
               type: "string",
               description:
@@ -221,18 +216,64 @@ const routes = {
                 "Your custom JSON schema. Required when intent is 'custom'. Describe the shape of data you want extracted. Max 3000 chars serialized.",
             },
           },
-          required: ["intent"],
+          required: ["url", "intent"],
         },
         output: {
           example: {
             success: true,
             intent: "custom",
+            url: "https://example.com/pricing",
+            data: { name: "Acme Pro", monthly_price: 29, has_free_tier: true },
+            extracted_at: "2026-03-24T12:00:00Z",
+          },
+        },
+      }),
+    },
+  },
+
+  // Batch extraction across multiple URLs
+  "POST /extract/batch": {
+    accepts: { ...accepts, price: "$0.25" },
+    description:
+      "Extract structured data from up to 5 URLs in one call. Send a JSON body with: urls (string[], max 5), intent (string), and optional schema (object for custom intent).",
+    mimeType: "application/json",
+    extensions: {
+      ...declareDiscoveryExtension({
+        bodyType: "json",
+        input: {
+          urls: ["https://example.com/pricing", "https://other.com/pricing"],
+          intent: "pricing",
+        },
+        inputSchema: {
+          properties: {
+            urls: {
+              type: "array",
+              items: { type: "string" },
+              description: "URLs to extract from (max 5).",
+            },
+            intent: {
+              type: "string",
+              description:
+                "Extraction intent. Use a preset or 'custom' with a schema.",
+            },
+            schema: {
+              type: "object",
+              description:
+                "Custom JSON schema. Required when intent is 'custom'.",
+            },
+          },
+          required: ["urls", "intent"],
+        },
+        output: {
+          example: {
+            success: true,
+            intent: "pricing",
+            batch: true,
+            count: 2,
+            succeeded: 2,
             results: [
-              {
-                url: "https://example.com/pricing",
-                success: true,
-                data: { name: "Acme Pro", monthly_price: 29, has_free_tier: true },
-              },
+              { url: "https://example.com/pricing", success: true, data: { product_name: "Acme" } },
+              { url: "https://other.com/pricing", success: true, data: { product_name: "Other" } },
             ],
             extracted_at: "2026-03-24T12:00:00Z",
           },
@@ -267,10 +308,8 @@ app.get("/health", (_req, res) => {
     network: NETWORK,
     endpoints: {
       "GET /extract": { price: "$0.03", description: "Single URL, preset intent" },
-      "POST /extract": {
-        price: "$0.15",
-        description: "Custom schema, batch (up to 10 URLs), or single URL",
-      },
+      "POST /extract": { price: "$0.05", description: "Single URL, custom schema support" },
+      "POST /extract/batch": { price: "$0.25", description: "Up to 5 URLs, any intent" },
       "POST /valuate": { price: "$0.10", status: "coming_soon" },
     },
     valid_intents: VALID_INTENTS,
@@ -313,13 +352,13 @@ app.get("/extract", async (req, res) => {
   }
 });
 
-// POST /extract — custom schema, batch, or single URL with body
+// POST /extract — single URL, custom schema support
 app.post("/extract", async (req, res) => {
-  const { url, urls, intent, schema } = req.body;
+  const { url, intent, schema } = req.body;
 
-  if (!intent) {
+  if (!url || !intent) {
     return res.status(400).json({
-      error: "Missing required field: intent",
+      error: "Missing required fields: url, intent",
       valid_intents: VALID_INTENTS,
     });
   }
@@ -335,53 +374,6 @@ app.post("/extract", async (req, res) => {
     });
   }
 
-  // Batch mode
-  if (urls && Array.isArray(urls)) {
-    if (urls.length > 10) {
-      return res.status(400).json({ error: "Batch limited to 10 URLs per request" });
-    }
-    if (urls.length === 0) {
-      return res.status(400).json({ error: "urls array is empty" });
-    }
-
-    const startTime = Date.now();
-    try {
-      const results = await extractBatch(urls, intent, schema || null);
-      results.forEach((r) => { if (r.usage) recordMetrics(intent, r.usage, startTime); });
-      const totalUsage = results.reduce(
-        (acc, r) => {
-          if (r.usage) {
-            acc.input_tokens += r.usage.input_tokens;
-            acc.output_tokens += r.usage.output_tokens;
-          }
-          return acc;
-        },
-        { input_tokens: 0, output_tokens: 0 }
-      );
-
-      res.json({
-        success: true,
-        intent,
-        batch: true,
-        count: urls.length,
-        succeeded: results.filter((r) => r.success).length,
-        results: results.map(({ url, success, error, data }) => ({ url, success, error, data })),
-        usage: { ...totalUsage, model: results.find((r) => r.usage)?.usage?.model || "unknown" },
-        extracted_at: new Date().toISOString(),
-      });
-    } catch (err) {
-      metrics.errors++;
-      console.error("Batch extraction failed:", err.message);
-      res.status(500).json({ success: false, error: err.message });
-    }
-    return;
-  }
-
-  // Single URL mode (POST)
-  if (!url) {
-    return res.status(400).json({ error: "Provide either 'url' (string) or 'urls' (array) in the body" });
-  }
-
   const startTime = Date.now();
   try {
     const { data, usage } = await extract(url, intent, schema || null);
@@ -390,6 +382,65 @@ app.post("/extract", async (req, res) => {
   } catch (err) {
     metrics.errors++;
     console.error(`Extraction failed for ${url}:`, err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// POST /extract/batch — multiple URLs, any intent
+app.post("/extract/batch", async (req, res) => {
+  const { urls, intent, schema } = req.body;
+
+  if (!intent) {
+    return res.status(400).json({ error: "Missing required field: intent", valid_intents: VALID_INTENTS });
+  }
+
+  if (!VALID_INTENTS.includes(intent)) {
+    return res.status(400).json({ error: `Invalid intent: "${intent}"`, valid_intents: VALID_INTENTS });
+  }
+
+  if (!urls || !Array.isArray(urls) || urls.length === 0) {
+    return res.status(400).json({ error: "Missing or empty 'urls' array" });
+  }
+
+  if (urls.length > 5) {
+    return res.status(400).json({ error: "Batch limited to 5 URLs per request" });
+  }
+
+  if (intent === "custom" && !schema) {
+    return res.status(400).json({
+      error: "intent=custom requires a 'schema' object",
+      example: { schema: { company_name: "string", employee_count: "number" } },
+    });
+  }
+
+  const startTime = Date.now();
+  try {
+    const results = await extractBatch(urls, intent, schema || null);
+    results.forEach((r) => { if (r.usage) recordMetrics(intent, r.usage, startTime); });
+    const totalUsage = results.reduce(
+      (acc, r) => {
+        if (r.usage) {
+          acc.input_tokens += r.usage.input_tokens;
+          acc.output_tokens += r.usage.output_tokens;
+        }
+        return acc;
+      },
+      { input_tokens: 0, output_tokens: 0 }
+    );
+
+    res.json({
+      success: true,
+      intent,
+      batch: true,
+      count: urls.length,
+      succeeded: results.filter((r) => r.success).length,
+      results: results.map(({ url, success, error, data }) => ({ url, success, error, data })),
+      usage: { ...totalUsage, model: results.find((r) => r.usage)?.usage?.model || "unknown" },
+      extracted_at: new Date().toISOString(),
+    });
+  } catch (err) {
+    metrics.errors++;
+    console.error("Batch extraction failed:", err.message);
     res.status(500).json({ success: false, error: err.message });
   }
 });
@@ -405,6 +456,7 @@ app.listen(PORT, () => {
   console.log(`\n   Endpoints:`);
   console.log(`     GET  /health   — free`);
   console.log(`     GET  /extract  — $0.03 (preset intent, single URL)`);
-  console.log(`     POST /extract  — $0.15 (custom schema, batch up to 10 URLs)`);
+  console.log(`     POST /extract  — $0.05 (single URL, custom schema)`);
+  console.log(`     POST /extract/batch — $0.25 (up to 5 URLs)`);
   console.log(`     POST /valuate  — $0.10 (coming soon)\n`);
 });

@@ -1,6 +1,9 @@
 import * as cheerio from "cheerio";
-import { chromium } from "playwright";
+import { chromium } from "playwright-extra";
+import stealth from "puppeteer-extra-plugin-stealth";
 import Database from "better-sqlite3";
+
+chromium.use(stealth());
 import { createHash } from "crypto";
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
@@ -115,6 +118,79 @@ async function fetchWithPlaywright(url) {
   } finally {
     await page.close();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Reddit JSON API — bypasses bot detection entirely
+// ---------------------------------------------------------------------------
+const REDDIT_PATTERN = /^https?:\/\/(old\.|www\.)?reddit\.com/;
+
+async function fetchRedditJson(url) {
+  // Normalize to old.reddit.com and append .json
+  const redditUrl = url
+    .replace(/^https?:\/\/(www\.)?reddit\.com/, "https://old.reddit.com")
+    .replace(/\/?(\?.*)?$/, ".json$1");
+
+  const response = await fetch(redditUrl, {
+    headers: {
+      "User-Agent": "Mozilla/5.0 (compatible; x402-extract-api/1.0; +https://github.com/plurality-llc/x402-extract-api)",
+      Accept: "application/json",
+    },
+    signal: AbortSignal.timeout(15000),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Reddit JSON API returned HTTP ${response.status}`);
+  }
+
+  const json = await response.json();
+
+  // Reddit returns an array for comment pages, object for listings
+  const listing = Array.isArray(json) ? json[0]?.data : json?.data;
+  if (!listing?.children) {
+    throw new Error("Unexpected Reddit JSON structure");
+  }
+
+  // Format into readable text for Claude
+  const lines = [];
+
+  for (const child of listing.children) {
+    const post = child.data;
+    if (child.kind === "t3") {
+      // Post
+      lines.push(`POST: ${post.title}`);
+      lines.push(`  Subreddit: r/${post.subreddit}`);
+      lines.push(`  Author: u/${post.author}`);
+      lines.push(`  Score: ${post.score} | Comments: ${post.num_comments}`);
+      lines.push(`  URL: ${post.url}`);
+      if (post.selftext) lines.push(`  Text: ${post.selftext.slice(0, 500)}`);
+      lines.push("");
+    }
+  }
+
+  // If it's a comment page, also extract comments
+  if (Array.isArray(json) && json[1]?.data?.children) {
+    lines.push("COMMENTS:");
+    for (const child of json[1].data.children) {
+      if (child.kind === "t1") {
+        const c = child.data;
+        lines.push(`  [u/${c.author}, ${c.score} pts] ${c.body?.slice(0, 300)}`);
+      }
+    }
+  }
+
+  const content = lines.join("\n").slice(0, 12000);
+
+  return {
+    title: listing.children[0]?.data?.title || "Reddit",
+    metaDescription: "",
+    ogTitle: "",
+    ogDescription: "",
+    content,
+    fullLength: content.length,
+    truncated: content.length >= 12000,
+    renderer: "reddit-json",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +379,15 @@ function parseHtml(html) {
 }
 
 export async function fetchPageContent(url) {
+  // Reddit: use their JSON API directly — no bot detection issues
+  if (REDDIT_PATTERN.test(url)) {
+    try {
+      return await fetchRedditJson(url);
+    } catch (err) {
+      console.error(`Reddit JSON failed for ${url}: ${err.message}, falling back to Playwright`);
+    }
+  }
+
   // Playwright-first: always render with a real browser for accurate content
   if (PLAYWRIGHT_ALWAYS) {
     try {
@@ -390,7 +475,7 @@ ${schemaStr}`;
 async function runExtraction(page, prompt, model) {
   const message = await anthropic.messages.create({
     model,
-    max_tokens: 2000,
+    max_tokens: 8000,
     system: "You are a precise data extraction engine. ONLY extract information that is explicitly stated on the page. NEVER infer, guess, or hallucinate data. If a field is not clearly present in the page content, omit it entirely. Accuracy is more important than completeness.",
     messages: [
       {
@@ -457,8 +542,8 @@ export async function extract(url, intent, customSchema = null) {
 // Batch extraction — same intent across multiple URLs (max 10)
 // ---------------------------------------------------------------------------
 export async function extractBatch(urls, intent, customSchema = null) {
-  if (urls.length > 10) {
-    throw new Error("Batch limited to 10 URLs per request");
+  if (urls.length > 5) {
+    throw new Error("Batch limited to 5 URLs per request");
   }
 
   const prompt = buildPrompt(intent, customSchema);
