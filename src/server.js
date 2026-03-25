@@ -7,6 +7,7 @@ import {
   bazaarResourceServerExtension,
   declareDiscoveryExtension,
 } from "@x402/extensions/bazaar";
+import { createCdpAuthHeaders } from "@coinbase/x402";
 import { extract, extractBatch, VALID_INTENTS } from "./extract.js";
 
 // ---------------------------------------------------------------------------
@@ -95,11 +96,23 @@ if (!PAY_TO) {
 // Facilitator setup
 // ---------------------------------------------------------------------------
 const isMainnet = NETWORK === "base";
-const facilitatorUrl = isMainnet
+const hasCdpAuth = process.env.CDP_API_KEY_ID && process.env.CDP_API_KEY_SECRET;
+
+// Use CDP facilitator when auth is available or on mainnet, otherwise x402.org testnet
+const facilitatorUrl = (hasCdpAuth || isMainnet)
   ? "https://api.cdp.coinbase.com/platform/v2/x402"
   : "https://x402.org/facilitator";
 
-const facilitatorClient = new HTTPFacilitatorClient({ url: facilitatorUrl });
+const facilitatorOptions = { url: facilitatorUrl };
+if (hasCdpAuth) {
+  facilitatorOptions.createAuthHeaders = createCdpAuthHeaders(
+    process.env.CDP_API_KEY_ID,
+    process.env.CDP_API_KEY_SECRET
+  );
+  console.log("Using CDP facilitator with authentication");
+}
+
+const facilitatorClient = new HTTPFacilitatorClient(facilitatorOptions);
 
 // ---------------------------------------------------------------------------
 // x402 Resource Server + Bazaar
