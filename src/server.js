@@ -157,7 +157,7 @@ const routes = {
   "GET /extract": {
     accepts: { ...accepts, price: "$0.03" },
     description:
-      "Extract structured data from any URL. Pass ?url=...&intent=... with intent being one of: product_specs, company_info, article_summary, pricing, job_listing, reviews, contact_extraction, structured_table, social_profile.",
+      "Extract structured JSON from any web page. 9 preset schemas (product_specs, company_info, article_summary, pricing, job_listing, reviews, contact_extraction, structured_table, social_profile) with full JS rendering. Pass ?url=...&intent=... to get clean, validated data ready for analysis.",
     mimeType: "application/json",
     extensions: {
       ...declareDiscoveryExtension({
@@ -213,7 +213,7 @@ const routes = {
   "POST /extract": {
     accepts: { ...accepts, price: "$0.05" },
     description:
-      "Extract structured data from a single URL with any intent including custom schemas. Send a JSON body with: url (string), intent (string), and optional schema (object for custom intent).",
+      "Extract structured JSON from any web page using your own custom schema. Define exactly the data shape you need — returns clean, validated JSON matching your schema. Full JS rendering for dynamic sites. Send a JSON body with url, intent, and schema.",
     mimeType: "application/json",
     extensions: {
       ...declareDiscoveryExtension({
@@ -260,7 +260,7 @@ const routes = {
   "POST /extract/batch": {
     accepts: { ...accepts, price: "$0.25" },
     description:
-      "Extract structured data from up to 5 URLs in one call. Send a JSON body with: urls (string[], max 5), intent (string), and optional schema (object for custom intent).",
+      "Batch extract structured JSON from up to 5 web pages in a single call. Same schema applied across all URLs — ideal for competitive analysis, price comparison, and lead enrichment. Full JS rendering, cached responses. Send urls array, intent, and optional schema.",
     mimeType: "application/json",
     extensions: {
       ...declareDiscoveryExtension({
