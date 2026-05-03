@@ -333,6 +333,8 @@ app.get("/", (_req, res) => {
     description:
       "Paid API that extracts structured JSON from any web page. Pay-per-call in USDC on Base via the x402 protocol.",
     network: NETWORK,
+    pay_to: PAY_TO,
+    facilitator: facilitatorUrl,
     endpoints: {
       "GET /health": "free — service status and intent list",
       "GET /extract?url=...&intent=...": "$0.03 — single URL, preset intent",
