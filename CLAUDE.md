@@ -26,7 +26,7 @@ A paid API that extracts structured intelligence from web pages, gated by the x4
 **Stack:** Node.js 20+ / Express 4 / x402 v2 SDK / Anthropic Claude API / Playwright (stealth) / Cheerio (fallback) / SQLite cache
 **Deploy target:** Railway (Hobby plan)
 **Production URL:** https://x402-extract-api-production.up.railway.app
-**Payment:** USDC on Base via x402 protocol (currently testnet: Base Sepolia)
+**Payment:** USDC on Base mainnet via x402 protocol
 
 ## Architecture
 
