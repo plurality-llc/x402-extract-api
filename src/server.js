@@ -141,6 +141,7 @@ initFacilitator();
 // Express app
 // ---------------------------------------------------------------------------
 const app = express();
+app.set("trust proxy", true); // Railway terminates TLS - honor X-Forwarded-Proto so req.protocol is https
 app.use(express.json({ limit: "16kb" })); // small limit — we only accept schemas, not uploads
 
 // ---------------------------------------------------------------------------
