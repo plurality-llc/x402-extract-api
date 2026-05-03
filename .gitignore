@@ -6,3 +6,4 @@ cache.db
 cache.db-wal
 cache.db-shm
 .DS_Store
+.claude/
