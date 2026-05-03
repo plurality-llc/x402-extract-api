@@ -326,6 +326,25 @@ app.get("/metrics", (req, res) => {
   res.json(getMetricsSummary());
 });
 
+// Landing (free) — explains the service to humans and agents that hit the root
+app.get("/", (_req, res) => {
+  res.json({
+    service: "x402-extract-api",
+    description:
+      "Paid API that extracts structured JSON from any web page. Pay-per-call in USDC on Base via the x402 protocol.",
+    network: NETWORK,
+    docs: "https://github.com/mliu/x402-extract-api",
+    discovery: "https://bazaar.x402.org",
+    endpoints: {
+      "GET /health": "free — service status and intent list",
+      "GET /extract?url=...&intent=...": "$0.03 — single URL, preset intent",
+      "POST /extract": "$0.05 — single URL, custom schema",
+      "POST /extract/batch": "$0.25 — up to 5 URLs",
+    },
+    valid_intents: VALID_INTENTS,
+  });
+});
+
 // Health check (free)
 app.get("/health", (_req, res) => {
   res.json({
